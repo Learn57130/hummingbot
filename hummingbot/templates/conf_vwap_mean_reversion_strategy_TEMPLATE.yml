@@ -1,0 +1,13 @@
+strategy: vwap_mean_reversion
+timeframe: 1h
+risk_per_trade: 0.02
+max_active_positions: 2
+atr_length: 14
+stop_loss_multiplier: 1.5
+sma_length: 100
+entry_z_score: -2.5
+exit_z_score: 0.0
+fallback_sl_z_score: -3.0
+markets: {}
+candles_config: []
+controllers_config: []
