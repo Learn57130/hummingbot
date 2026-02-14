@@ -1,13 +1,14 @@
 import asyncio
 import time
 from decimal import Decimal
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Union, Any
 
 import lighter
 from lighter.ws_client import WsClient
 
 from hummingbot.connector.derivative.lighter_perpetual import lighter_perpetual_constants as CONSTANTS, lighter_perpetual_utils
 from hummingbot.connector.derivative.lighter_perpetual.lighter_perpetual_api_order_book_data_source import LighterPerpetualAPIOrderBookDataSource
+from hummingbot.connector.derivative.lighter_perpetual.lighter_perpetual_user_stream_data_source import LighterPerpetualUserStreamDataSource
 from hummingbot.connector.perpetual_derivative_py_base import PerpetualDerivativePyBase
 from hummingbot.connector.derivative.position import Position
 from hummingbot.core.data_type.common import OrderType, PositionAction, PositionMode, TradeType, PositionSide
@@ -15,6 +16,8 @@ from hummingbot.core.data_type.in_flight_order import PerpetualDerivativeInFligh
 from hummingbot.core.data_type.trade_fee import TradeFeeBase, TokenAmount
 from hummingbot.core.utils.async_utils import safe_ensure_future, safe_gather
 from hummingbot.logger import HummingbotLogger
+from hummingbot.core.web_assistant.web_assistants_factory import WebAssistantsFactory
+from hummingbot.core.web_assistant.auth import AuthBase
 
 
 class LighterPerpetualDerivative(PerpetualDerivativePyBase):
@@ -41,8 +44,10 @@ class LighterPerpetualDerivative(PerpetualDerivativePyBase):
         self._signer_client: Optional[lighter.SignerClient] = None
         self._api_client: Optional[lighter.ApiClient] = None
 
-        self._market_id_map: Dict[str, int] = {}  # symbol -> market_id
-        self._id_market_map: Dict[int, str] = {}  # market_id -> symbol
+        self._market_id_map: Dict[str, int] = {}
+        self._id_market_map: Dict[int, str] = {}
+
+        self._trading_pairs = trading_pairs if trading_pairs else []
 
         super().__init__(kwargs.get("balance_asset_limit"), kwargs.get("rate_limits_share_pct"))
 
@@ -62,11 +67,101 @@ class LighterPerpetualDerivative(PerpetualDerivativePyBase):
     def funding_fee_poll_interval(self) -> int:
         return 120
 
+    @property
+    def client_order_id_max_length(self):
+        return 32
+
+    @property
+    def client_order_id_prefix(self):
+        return "HBOT"
+
+    @property
+    def trading_rules_request_path(self):
+        return ""
+
+    @property
+    def trading_pairs_request_path(self):
+        return ""
+
+    @property
+    def check_network_request_path(self):
+        return ""
+
+    @property
+    def is_cancel_request_in_exchange_synchronous(self) -> bool:
+        return True
+
+    @property
+    def is_trading_required(self) -> bool:
+        return self._trading_required
+
+    @property
+    def authenticator(self):
+        return None
+
+    @property
+    def rate_limits_rules(self):
+        return CONSTANTS.RATE_LIMITS
+
+    @property
+    def domain(self):
+        return self._domain
+
+    @property
+    def trading_pairs(self):
+        return self._trading_pairs
+
+    @property
+    def supported_order_types(self):
+        return [OrderType.LIMIT, OrderType.MARKET]
+
     @classmethod
     def logger(cls) -> HummingbotLogger:
         if cls._logger is None:
             cls._logger = HummingbotLogger(__name__)
         return cls._logger
+
+    def _create_web_assistants_factory(self) -> WebAssistantsFactory:
+        return WebAssistantsFactory(throttler=self._throttler)
+
+    def _create_user_stream_data_source(self) -> LighterPerpetualUserStreamDataSource:
+        return LighterPerpetualUserStreamDataSource(
+            lighter_api_key_private_key=self._lighter_api_key_private_key,
+            lighter_account_index=self._lighter_account_index,
+            lighter_api_key_index=self._lighter_api_key_index,
+            domain=self._domain
+        )
+
+    def _user_stream_event_listener(self):
+        return None
+
+    def _is_request_exception_related_to_time_synchronizer(self, request_exception: Exception):
+        return False
+
+    def _is_order_not_found_during_status_update_error(self, status_update_exception: Exception) -> bool:
+        return False
+
+    def _is_order_not_found_during_cancelation_error(self, cancelation_exception: Exception) -> bool:
+        return False
+
+    async def _format_trading_rules(self, exchange_info_dict: Dict[str, Any]) -> List:
+        return []
+
+    async def _initialize_trading_pair_symbols_from_exchange_info(self, exchange_info: Dict[str, Any]):
+        await self._update_market_map()
+
+    async def _update_trading_fees(self):
+        pass
+
+    async def _all_trade_updates_for_order(self, order: PerpetualDerivativeInFlightOrder) -> List[TradeType]:
+        return []
+
+    async def _request_order_status(self, order: PerpetualDerivativeInFlightOrder) -> OrderState:
+        return OrderState.OPEN
+
+    async def _place_cancel(self, order_id: str, tracked_order: PerpetualDerivativeInFlightOrder):
+        await self._cancel_order(order_id, tracked_order.trading_pair)
+        return True
 
     async def start_network(self):
         await super().start_network()
@@ -218,7 +313,7 @@ class LighterPerpetualDerivative(PerpetualDerivativePyBase):
             self._account_available_balances.clear()
 
             for asset in account.assets:
-                symbol = asset.symbol # e.g. "USDC"
+                symbol = asset.symbol
                 balance = Decimal(str(asset.balance))
                 locked = Decimal(str(asset.locked_balance))
                 available = balance - locked
@@ -238,7 +333,7 @@ class LighterPerpetualDerivative(PerpetualDerivativePyBase):
             account = account_response.accounts[0]
 
             for pos in account.positions:
-                symbol = pos.symbol # "ETH"
+                symbol = pos.symbol
                 trading_pair = self._symbol_to_trading_pair(symbol)
 
                 amount = Decimal(str(pos.position))
@@ -248,7 +343,6 @@ class LighterPerpetualDerivative(PerpetualDerivativePyBase):
                 entry_price = Decimal(str(pos.avg_entry_price))
                 unrealized_pnl = Decimal(str(pos.unrealized_pnl))
 
-                # Leverage
                 leverage = Decimal("1")
                 imf = Decimal(str(pos.initial_margin_fraction))
                 if imf > 0:
@@ -256,13 +350,14 @@ class LighterPerpetualDerivative(PerpetualDerivativePyBase):
 
                 position = Position(
                     trading_pair=trading_pair,
-                    side=PositionSide.LONG if amount > 0 else PositionSide.SHORT,
+                    position_side=PositionSide.LONG if amount > 0 else PositionSide.SHORT,
                     unrealized_pnl=unrealized_pnl,
                     entry_price=entry_price,
                     amount=abs(amount),
                     leverage=leverage
                 )
-                self._perpetual_trading.update_position(position)
+                pos_key = self._perpetual_trading.position_key(trading_pair, position.position_side)
+                self._perpetual_trading.set_position(pos_key, position)
 
         except Exception as e:
             self.logger().error(f"Error updating positions: {e}")

@@ -62,10 +62,10 @@ class LighterPerpetualAPIOrderBookDataSource(PerpetualAPIOrderBookDataSource):
     async def get_funding_info(self, trading_pair: str) -> FundingInfo:
         return FundingInfo(
             trading_pair=trading_pair,
-            index_price=0,
-            mark_price=0,
+            index_price=Decimal("0"),
+            mark_price=Decimal("0"),
             next_funding_utc_timestamp=0,
-            rate=0,
+            rate=Decimal("0"),
         )
 
     async def _update_market_map(self):
@@ -130,11 +130,10 @@ class LighterPerpetualAPIOrderBookDataSource(PerpetualAPIOrderBookDataSource):
             if not symbol: return
             pair = f"{symbol}-USDC"
 
-            # Assuming update contains nonce/timestamp
             ts = time.time()
 
             msg = OrderBookMessage(
-                message_type=OrderBookMessageType.SNAPSHOT, # Lighter seems to send full snapshots? Or check if diff.
+                message_type=OrderBookMessageType.SNAPSHOT,
                 content={
                     "trading_pair": pair,
                     "bids": [[float(b.price), float(b.amount)] for b in update.bids],
@@ -146,9 +145,6 @@ class LighterPerpetualAPIOrderBookDataSource(PerpetualAPIOrderBookDataSource):
             if self._diff_messages_queue:
                 self._diff_messages_queue.put_nowait(msg)
 
-            # If update contains trades?
-            # If not, ignore trades queue for now.
-
         self._ws_client = WsClient(
             host=host,
             path='/stream',
@@ -157,3 +153,18 @@ class LighterPerpetualAPIOrderBookDataSource(PerpetualAPIOrderBookDataSource):
         )
 
         asyncio.create_task(self._ws_client.run_async())
+
+    async def subscribe_to_trading_pair(self, trading_pair: str):
+        pass
+
+    async def unsubscribe_from_trading_pair(self, trading_pair: str):
+        pass
+
+    def _parse_funding_info_message(self, message: Any) -> FundingInfo:
+        return FundingInfo(
+            trading_pair=message.get("trading_pair", ""),
+            index_price=Decimal("0"),
+            mark_price=Decimal("0"),
+            next_funding_utc_timestamp=0,
+            rate=Decimal("0"),
+        )
